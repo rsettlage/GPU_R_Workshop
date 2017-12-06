@@ -1,0 +1,858 @@
+---
+title: "A gentle introduction to R and GPUs"
+author: "Bob Settlage"
+date: '`r Sys.Date()`'
+output:
+  ioslides_presentation:
+    fig_caption: yes
+    fig_height: 6
+    fig_width: 4
+    smaller: yes
+  slidy_presentation: default
+---
+
+```{r setup, include=FALSE}
+    knitr::opts_chunk$set(echo = F, eval=F, cache=F, tidy=T, include=T)
+
+    library.warn <- library
+        library <- function(package, help, pos = 2, lib.loc = NULL, character.only = FALSE,
+                            logical.return = FALSE, warn.conflicts = FALSE, quietly = TRUE,
+                            verbose = getOption("verbose")) {
+           if (!character.only) {
+              package <- as.character(substitute(package))
+           }
+           suppressPackageStartupMessages(library.warn(
+              package, help, pos, lib.loc, character.only = TRUE,
+              logical.return, warn.conflicts, quietly, verbose))}
+    
+    plot_jpeg = function(path, add=FALSE)
+    {
+      require('jpeg')
+      jpg = readJPEG(path, native=T) # read the file
+      res = dim(jpg)[1:2] # get the resolution
+      if (!add) # initialize an empty plot area if add==FALSE
+        plot(1,1,xlim=c(1,res[1]),ylim=c(1,res[2]),asp=1,type='n',xaxs='i',yaxs='i',xaxt='n',yaxt='n',xlab='',ylab='',bty='n')
+      rasterImage(jpg,1,1,res[1],res[2])
+    }
+            # A function for captioning and referencing images
+    fig <- local({
+        i <- 0
+        ref <- list()
+        list(
+            cap=function(refName, text) {
+                i <<- i + 1
+                ref[[refName]] <<- i
+                text
+            },
+            ref=function(refName) {
+                ref[[refName]]
+            })
+    })
+```
+
+## GPUs and R Workshop 
+
+Todays Agenda  
+
+- What/why GPUs  
+- ARC GPU resources  
+- GPU computing - Programming languages  
+- Ways to use access the GPUs through R  
+    + R packages  
+    + CUDA/OpenCL libraries  
+    + Directives
+    + CUDA/OpenCL/etc    
+- Beginner R-GPU - R GPU packages  
+    + matrix multiply  
+    + Solve 
+
+## GPUs and R Workshop cont.  
+
+- Intermediate R-GPU - CUDA/OpenCL libraries
+    + Vector add  
+    + Matrix multiply  
+- Discuss generalized computations  
+    + Programming Model  
+    + Memory  
+    + Variable casting  
+- Writing/wrapping your own CUDA/OpenCL code
+    + example
+- Profiling GPU use
+
+## Introduction | Acknowledgements and Inspirations
+
+The following sources were used in part or as inspiration:
+
+- ARC presentation on CUDA
+    <https://www.arc.vt.edu/userguide/cuda/>  
+- NVIDIA accelerate R (lots of good stuff here)   
+    <https://devblogs.nvidia.com/parallelforall/accelerate-r-applications-cuda/>
+- Berkely GPU Workshop 2016 (most awesome writeup!!)   
+    <https://github.com/berkeley-scf/gpu-workshop-2016>
+- r-tutor GPU section  
+    <http://www.r-tutor.com/gpu-computing>
+- r-bloggers GPU programming with gpur  
+    <https://www.r-bloggers.com/r-gpu-programming-for-all-with-gpur/>
+- parallelr.com computing with gpuR  
+    <http://www.parallelr.com/r-gpu-programming-for-all-with-gpur/>
+- really nice presentation on NVIDA CUDA programming
+    <http://people.math.umass.edu/~johnston/M697S12/
+    CUDA_threads_and_block_scheduling.pdf>
+
+## Why GPUs??  
+
+CPU trends -- KarlRupp.net
+
+```{r eval=T, out.width = "600px"}
+    knitr::include_graphics("40-years-processor-trend.png",auto_pdf=F)
+```
+
+## So, why GPUs??
+
+You need your code to go faster, you have a few options:  
+
+- Be a more efficient programmer  
+    + use vector/matrix operations  
+    + remove redundant operations  
+    + avoid memory copy/preallocate  
+- Port your code to C/C++/Fortran   
+    + full Monte (.C or .Call)
+    + Rcpp
+- Parallelize, ie use more cores
+    + parallel packages
+    + MPI
+    + GPU...
+
+## What are GPUs?
+
+GPU = Graphics Processing Unit  
+GPGU = General Purpose GPU  
+
+- Where a CPU may have 2-36 cores, a typical GPU will have 100-1000's of cores. The Tesla P100 GPU has 3584 cores.  
+  
+![Tesla P100](tesla-3-quater.png)
+
+
+## What do GPUs do better than CPUs
+
+Think massively parallel vanilla compute, like updating a picture across a billion pixels ...
+
+- For situations where the same calculation is done across many slices of a dataset or problem, the massive parallelism of a GPU may be useful (SIMD).  
+
+- Nothing comes for free, here we lose memory and suffer from data transfer from system to GPU (and likely back).  IE, not all programming situations are appropriate for GPU devices.  A high end GPU has 16-32 GB on card memory which may limit the utility of GPUs in some situations.  More on this later.
+
+
+## Basic example -- pi (1)  
+
+Ratio of areas of unit circle (C) and unit square (S).  Calculate areas by "throwing darts" and counting the times the darts are found in circle and square
+
+$$
+\begin{eqnarray*}
+\frac{C}{S} & = & \frac{\pi r^2}{(2r)^2}=\frac{\pi}{4} \\
+\pi & = & \frac{4C}{S}
+\end{eqnarray*}
+$$
+
+```{r echo=F, eval=T,  out.width = "200px"}
+
+    # initialize a plot
+    plot(c(-1, 1), c(-1, 1), type = "n")
+    # prepare "circle data"
+    radius <- 1
+    theta <- seq(0, 2 * pi, length = 200)
+    # draw the circle
+    lines(x = radius * cos(theta), y = radius * sin(theta))
+    # draw bounding square
+    abline(h=c(-1,1),col="red")
+    abline(v=c(-1,1),col="red")
+
+```
+
+## Basic example -- pi (1)
+
+```{r echo=F, eval=T, out.width="400px"}
+
+    # initialize a plot
+    plot(c(-1, 1), c(-1, 1), type = "n")
+
+    n <- 10000
+    x <- runif(n,0,1)
+    y <- runif(n,0,1)
+    inout <- x^2+y^2<1
+    pi_est <- 4*sum(inout)/n
+    points(x=x,y=y,col="blue",pch=20)
+    
+    # prepare "circle data"
+    radius <- 1
+    theta <- seq(0, 2 * pi, length = 200)
+    # draw the circle
+    lines(x = radius * cos(theta), y = radius * sin(theta))
+    # draw bounding square
+    abline(h=c(-1,1),col="red")
+    abline(v=c(-1,1),col="red")
+    
+
+```
+
+## Basic example -- pi (2)
+
+Monte carlo integrate area in circle and use formula.
+
+$$
+\begin{eqnarray*}
+f(x) & = & \int_0^{1} \sqrt{1-x^2} dx \\
+    & = & \frac{area}{4} \\
+    & \approx & \frac{1}{4} \sum_{x_i \in U(0,1), i = [1 \dots N]} \frac{\sqrt{1-x^2}}{N}
+\end{eqnarray*}
+$$
+
+Turns out, this is requires a LOT of points to get to a reasonable accuracy.  Good example for GPUs???
+
+## Basic example -- pi (3)  
+
+Buffon's needle (hotdog) toss:
+
+Toss hotdogs to ground with a ladder of evenly spaced lines layed out.  IF the spacing of the lines is the same as the length of the hotdog, we get:  
+
+$$\pi = \frac{2nh}{kL} = \frac{2*tosses}{crosses}$$
+
+
+Good example for GPUs???  
+
+What if we wanted to explore hotdog length (h) and line spacing (L)?
+
+## Statistics Example | OLS
+
+From ordinary least squares, we know:  
+$\hat{\beta} = (X'X)^{-1}X'Y$  
+
+We want to solve for $\hat{\beta}$, but it turns out it is more efficent and stable to solve a system of equations, so:  
+
+$(X'X)\hat{\beta} = X'y$
+
+
+* How many matrix operations do you see here?  
+* If X is 5x5, how many total operations??
+
+A ton.
+
+So, lets get on a GPU and start computing...
+
+
+## ARC GPU resources  
+Within the ARC clusters, we have several varieties of GPU resources:  
+
+- general purpose NVIDIA gpus  
+    + BlueRidge:  
+        4 nodes with 2 K40m  
+        *130 nodes with Xeon Phi* <-- dead end   
+    + NewRiver:  
+        8 nodes with 1 K80 (plus interactive nodes)  
+        40 nodes with 2 P100  
+        *40 nodes with 2 V100* **coming soon**
+    + Cascades:  
+        4 nodes with 2 K80  
+- Machine learning cluster  
+    + Huckleberry:  
+        14 IBM Power8 nodes with 4 P100  
+        
+<http://www.arc.vt.edu/> 
+
+## Let's get to a GPU node
+
+First -- log in to arc (NewRiver)  
+    `ssh -Y <pid>@newriver1.arc.vt.edu`  
+    
+    look at software stack
+    
+Second -- get a job, seriously  
+    `interact -A<your allocation> -lnodes=1:ppn=28:gpus=1 -q p100_dev_q -lwalltime=2:00:00`  
+    
+    look at software stack
+
+## Examples in this presentation
+
+Many of the examples we are going to explore were created by Nvidia and are found here:  
+
+`$CUDA_LIB/../samples/`
+The value of CUDA_LIB is defined upon loading the cuda module.  
+
+All of the examples can be found here:  
+https://github.com/rsettlage/GPU_R_Workshop.git  
+
+## Getting basic information on the GPU | GPU info  
+
+Nvidia versions:  
+`module load cuda/8.0.61`
+`$CUDA_LIB/../samples/1_Utilities/deviceQuery/deviceQuery`  
+`nvidia-smi -q`
+
+gpuR version:
+
+`module load gcc/5.2.0 openblas R/3.4.1 R-gpu/3.4.1`
+
+```{r gpu_info1, echo=T}
+    library(gpuR)
+    str(gpuInfo())
+    detach("package:gpuR", unload=TRUE)
+```
+
+
+## Ways to use the GPUs through R  
+
+There are four ways to access a GPU through R:
+
+- use an R package with the function you are interested in 
+    + expanding but limited number of functions available  
+    + sometimes difficult to install, MUST DL package, then install on GPU node
+    + sometimes need to do "export PKG_CFLAGS=-I$CUDA_INC"  
+- use a directive (OpenACC)  
+    + not going to discuss this today  
+- use a CUDA/OpenCL library with the function you are interested in  
+    + limited number of libraries
+- write CUDA/OpenCL code and associated R wrapper  
+    + more power = more effort = more reward  
+    
+Kinda a 5th way ... nvblas ...
+
+## NVBLAS
+
+OK, this one is kinda cheating.  Nvidia wrote an "interceptor" to BLAS that basically judges a problem set and decides if it is GPU worthy.
+
+```{r echo=T, eval=F, include=T, tidy=F}
+module purge
+module load cuda/8.0.61 gcc/5.2.0 openblas R/3.4.1 R-gpu/3.4.1
+export NVBLAS_CONFIG_FILE=`pwd`/nvblas.conf
+
+env LD_PRELOAD=$CUDA_LIB/libnvblas.so Rscript mm.R
+
+```
+
+What's in mm.R:
+
+```{r echo=T, include=T}
+nr=15000
+x=matrix(rnorm(nr*nr), nrow=nr)
+system.time(x %*% x)
+```
+
+## R - GPU interface | R-gpu packages
+```{r eval=T, out.width = "600px"}
+    knitr::include_graphics("R_CUDA.png",auto_pdf=F)
+```
+    
+## R gpu packages
+
+-Disclaimer: partial list!  
+
+- gputools (CUDA and cuBlas)  
+- cudaBayesreg (CUDA)  
+- HiPLARM (PLASMA/MAGMA from UTK, CUDA and BLAS)  
+- HiPARb  
+- gmatrix  
+- gpuR (OpenCL, viennaCL)  
+- gpuRcuda (CUDA)  
+- rpud (rpudplus add-on)  
+- RCUDA, OpenCL, and ROpenCL
+
+## Basic GPU computing -- matrix multiply  
+
+- A common application is matrix muliplication 
+
+This is a perfect application for GPUs.  Let's do this with a moderately sized matrix.  Let's start with gpuR:  
+
+```{r echo=F, eval=T}
+library(gpuR)
+```
+
+Note that gpuR looks for devices and finds two on my laptop.  Cool.
+
+## Let's compare:
+```{r gpuR_MM, eval=T, echo=T, tidy=F, include=T}
+    #library(pryr) #if we wanted to look at addresses
+    nr<-5000 #lets be square
+    x<-matrix(rnorm(nr*nr,0,1),nrow=nr,ncol=nr)
+    #CPU bound version, we could optimize but lets stay vanilla
+    time1<-system.time({
+        mm1 <- x %*% x
+        })
+    #library(gpuR) <---preloaded
+    #GPU version, GPU pointer to CPU memory!! (gpuMatrix is simply a pointer)
+    gpuX = gpuMatrix(x, type="float") #point GPU to matrix
+    time2<-system.time({
+        mm2<-gpuX %*% gpuX
+    })
+    #GPU version, in GPU memory!! (vclMatrix formation is a memory transfer)
+    vclX = vclMatrix(x, type="float") #push matrix to GPU
+    time3<-system.time({
+        mm3<-vclX %*% vclX
+    })
+    #detach("package:gpuR", unload=TRUE)
+```
+
+## Basic GPU (Host-Device relationship)
+
+![Source https://www.slideshare.net/girishgap](https://image.slidesharecdn.com/02direct3dpipeline-121022231116-phpapp02/95/02-direct3-dpipeline-4-638.jpg?cb=1350948040)
+
+## Basic GPU computing -- matrix multiply results  
+
+```{r eval=T}
+    temp<-as.data.frame(rbind(time1,time2,time3))[,1:3]
+    rownames(temp)<-c("CPU","CPU-GPU","GPU")
+    knitr::kable(temp,
+            caption="matrix multiply timing")
+```
+
+Not bad for essentially no effort.  Note that this was a relatively small matrix, as the matrix grows, the need for vclMatrix over gpuMatrix becomes more pronounced as does the data transfer penalty.
+
+## Basic GPU computing -- demo
+
+Lets do this on NR.  This example is in the testR_BLAS set.
+
+```{r echo=T, eval=F, tidy=F}
+module load cuda/8.0.61 gcc/5.2.0 openblas R/3.4.1
+bash cpu.sh
+```
+
+This runs:  
+```{r echo=T, eval=F, tidy=F}
+Rscript -e "N<-c(25,50,500,1000,5000,7500,10000,12500); 
+            for(n in seq_along(N)){
+                A<-matrix(1:N[n]*2,nrow=N[n],ncol=N[n]);
+                time1<-system.time(temp<-t(A)%*%A);
+                cat('nrow=ncol=',N[n],' time',time1[3],'\n');
+            }"
+```
+
+Now run:
+```{r echo=T, eval=F, tidy=F}
+bash gpuR.sh
+```
+
+This runs the gpuR version 3 times:  
+1. gpuMatrix, ie pointer to cpu  
+2. vclMatrix, ie memory copy BUT only times actual compute  
+3. vclMatrix, times memory copy AND compute
+
+
+## Basic GPU computing -- Solve  
+```{r gpuR_S, eval=T, echo=T}
+    set.seed(123456)
+    np<-90 #number of predictors
+    nr<-100000 #number of observations
+    X<-cbind(5,1:nr,matrix(rnorm((np-1)*nr,0,.01),nrow=nr,ncol=(np-1)))
+    beta<-matrix(c(1,3,runif(np-1,0,0.2)),ncol=1)
+    y<-X%*%beta+matrix(rnorm(nr,0,1),nrow=nr,ncol=1)
+    #CPU bound version, slight optimize via crossprod but otherwise vanilla
+    time2<-system.time({
+        ms2<-solve(crossprod(X), crossprod(X, y))
+        })
+    library(gpuR)
+    #devtools::install_github('cdeterman/gpuR', ref = 'develop')
+    #GPU version, GPU pointer to CPU memory!! (gpuMatrix is simply a pointer)
+    gpuX = gpuMatrix(X, type="float") #point GPU to matrix
+    gpuy = gpuMatrix(y, type="float")
+    time4<-system.time({
+        ms4<-gpuR::solve(gpuR::crossprod(gpuX), gpuR::crossprod(gpuX, gpuy))
+    })
+    #GPU version, in GPU memory!! (vclMatrix formation is a memory transfer)
+    vclX = vclMatrix(X, type="float") #push matrix to GPU
+    vcly = vclMatrix(y, type="float")
+    time5<-system.time({
+        ms5<-gpuR::solve(gpuR::crossprod(vclX), gpuR::crossprod(vclX, vcly))
+    })
+    detach("package:gpuR", unload=TRUE)
+    
+```
+
+
+## Basic GPU computing -- solve results  
+
+```{r eval=T}
+    temp<-as.data.frame(rbind(time1,time2,time3))[,1:3]
+    rownames(temp)<-c("CPU","CPU-GPU","GPU")
+    knitr::kable(temp,
+            caption="solve timing")
+```
+
+## R - GPU interface | R-CUDA libraries
+```{r eval=T, out.width = "600px"}
+    knitr::include_graphics("R_CUDA.png",auto_pdf=F)
+```
+
+## Intermediate GPU computing | CUDA/OpenCL libraries  
+
+- libraries:  
+    + CUDA:  
+    cuBLAS, cuRAND, cuFFT, cuSOLVER, list growing day(?)ly  
+    <https://developer.nvidia.com/cuda-toolkit>  
+    + OpenCL:  
+    <http://www.iwocl.org/resources/opencl-libraries-and-toolkits/>
+    
+These libraries can be wrapped within a Fortran or C/C++ routine which is then made available to R.
+
+## CUDA/OpenCL libraries setup  
+
+Notes:  
+
+1. data passed to/from R-C must be sent as pointers  
+2. data in R is on CPU, must move it to GPU (and back)  
+3. R doesn't have all the data types in C, so cast??  
+4. must use nvcc to compile: basically separates out CPU/GPU tasks
+
+Let's look at an example.  The following codes are found in testR_BLAS.
+
+## Basic CUDA function
+
+```{r eval=F, echo=T, tidy=F}
+// declare libraries
+#include <R.h>
+#include <cublas_v2.h>
+/* This function is written for R cuda matrix multiply.
+going to use the cublasDgemm
+remember, cublasDgemm is really prepping for a*(op)A %*% (op)B + b*C
+*/
+extern "C"
+void cuMM(int *nr_A, int *nc_A, ...)
+{
+    // Set up variables
+
+    // Create a handle for CUBLAS
+
+    // Allocate arrays on GPU
+
+    // Copy CPU data to GPU (could also use Unified Memory)
+
+    // Multiply A and B on GPU
+    cublasDgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, *nr_A ...);
+    
+    // Copy the data back to CPU
+
+    //Free GPU memory
+
+    //return 0;
+}
+
+```
+
+## CUDA program compiling  
+
+As usual, you must compile the C program:
+
+```{r echo=T, eval=F, tidy=F}
+
+module load cuda/8.0.61 gcc/5.2.0 openblas R/3.4.1
+
+nvcc -O3 -G -I$CUDA_INC -I$R_INC -L$R_LIB -L$CUDA_LIB \\
+   -lcudart -lcublas -lcurand --shared -Xcompiler -fPIC \\
+   -o cuBLAS_MM.so cuBLAS_MM_d.cu
+
+```
+
+## R side wrapper ...
+
+```{r eval=F, echo=T, tidy=F}
+
+## cuMM(int *nr_A, int *nc_A, int *nc_B, ...)
+cuMM <- function(A, B)
+{
+    if(!is.loaded("cuMM")) {
+        dyn.load("cuBLAS_MM.so")
+    }
+    C <- matrix(0,nrow=nrow(A),ncol=ncol(B))
+    rst <- .C("cuMM",
+              as.integer(nrow(A)),
+              as.integer(ncol(A)),
+              .
+              .
+              .)
+    #print(rst)
+    C <- matrix(rst[[6]],nrow=nrow(A),ncol=ncol(B))
+    return(C)
+}
+
+```
+
+## cuBLAS demo
+
+Run the following in testR_BLAS
+```{r eval=F, echo=T, tidy=F}
+    bash gpu_cuBLAS.sh
+```
+
+This runs the same matrix multiplies but on the GPU using cuBLAS.
+
+## R - GPU interface | OpenCL through R-package
+```{r eval=T, out.width = "600px"}
+    knitr::include_graphics("R_CUDA.png",auto_pdf=F)
+```
+
+## Writing CUDA/OpenCL
+
+As stated, the available CUDA/OpenCL libraries (and R packages) can be limiting.  
+
+You CAN write your own.  BUT, perhaps, you don't like all the compiling, decorating, etc etc.
+
+RCuda and OpenCL are two answers.  Let's look at the R package OpenCL.
+
+This package allows you to:  
+
+    + choose a gpu to compute on  
+    + write a OpenCL kernel  
+    + push and compile this kernel on the gpu  
+    + compute using the kernel  
+
+What do you gain: automagic handling of all the pushing of data back and forth.  
+
+What do you lose: functionality in things like macros, inclusion of libraries etc.
+
+## Intermediate GPU computing | OpenCL vector add
+
+Ripped from:  
+<https://gist.github.com/mprymek/8ca298f0ff2b139b0c63>
+
+```{r openCL_va1, eval=F, echo=T}
+    library(OpenCL)
+    p = oclPlatforms()       #gets computing platform 
+    d = oclDevices(p[[1]])   #sets GPU device we want to use
+    vector_add_code <- c("
+       #pragma OPENCL EXTENSION cl_khr_fp64 : enable
+       __kernel void gpu_sum(
+         // first two args are mandatory
+         __global float* output,
+         const unsigned int n,
+         // user args
+         __global const float* input1,
+         __global const float* input2)
+       {
+          int i = get_global_id(0);      
+          if (i<n) output[i] = input1[i] + input2[i];
+       };")
+```
+
+## Intermediate GPU computing | OpenCL vector add cont
+
+```{r, openCL_va2, eval=F, echo=T}
+    #compile the code we want to use on the GPU device
+    k.gpu.sum <- oclSimpleKernel(d[[1]], "gpu_sum", vector_add_code, "best")
+    vector1 <- as.double(1:10)
+    vector2 <- as.double(2:11)
+    #run the GPU code and get result
+    result <- oclRun(k.gpu.sum, length(vector1), vector1, vector2)
+    print(result)
+    detach("package:OpenCL", unload=TRUE)
+
+```
+
+## Intermediate GPU computing | OpenCL matrix multiply
+
+Going to compute each element in separate threads.  For illustration, lets do an aweful compute...
+
+```{r openCL_mm1, eval=F, echo=T}
+    library(OpenCL)
+    p = oclPlatforms()       #gets computing platform 
+    d = oclDevices(p[[1]])   #sets GPU device we want to use
+    mm_code <- c(
+            "//pragma OPENCL EXTENSION cl_khr_fp64 : enable //hmmm, slidy!!
+            __kernel void myMM(__global float* C, 
+                        const int totalMN, const int M, const int N, const int K,
+                        const __global float* A,
+                        const __global float* B)
+            {   // Thread identifiers
+                const int MN = get_global_id(0); // element i.d. of C
+                int acc = 0;
+                int m1Row = MN / M; //current row M1
+                int m2Col = MN % N; //current col M2
+                for (int k=0; k<K; k++) {
+                        acc += A[m1Row*M + k]*B[m2Col+k*N];}
+                // Store the result
+                C[MN] = acc;};")
+```
+    
+## Intermediate GPU computing | OpenCL matrix cont
+
+```{r, openCL_mm2, echo=T,eval=F,tidy=F}
+    #compile the code we want to use on the GPU device
+    k.gpu.mm <- oclSimpleKernel(d[[1]], "myMM", mm_code, "best")
+    ndim<-10
+    matrix1 <- matrix(1:(ndim^2),nrow=ndim,ncol=ndim) #let make this square
+    matrix2 <- matrix1 #and the same, ie A*A is conformable
+    base_mm<-matrix1%*%matrix2
+    #run the GPU code and get result
+    result <- matrix(oclRun(k.gpu.mm,
+                nrow(matrix1)*ncol(matrix2),nrow(matrix1),ncol(matrix2), 
+                ncol(matrix1),as.double(matrix1), as.double(matrix2)),
+                nrow=nrow(matrix1),ncol=ncol(matrix2))
+    table(base_mm == result)
+    detach("package:OpenCL", unload=TRUE)
+
+```
+
+## R - GPU interface | Roll your own CUDA, serve to R
+```{r eval=T, out.width = "600px"}
+    knitr::include_graphics("R_CUDA.png",auto_pdf=F)
+```
+
+## Generalized GPU computing | Programming languages  
+
+Currently, the two main programming languages are:
+
+- CUDA: specific to Nvidia GPUs
+- OpenCL: developed by Apple, but now Open Source
+    + CAN work on Nvidia devices
+
+There are a few others, such as Harlan and Futhark.  (ViennaCL??)
+
+## GPU programming model
+
+Most (all?) the following material paraphrased from Nvidia:  
+<http://docs.nvidia.com/cuda/index.html#cudacbestpractices>
+
+Basic idea (CUDA terms used where necessary):  
+A GPU is built around an array of Streaming Multiprocessors (SMs) (see Hardware Implementation for more details). A multithreaded program is partitioned into blocks of threads that execute independently from each other, so that a GPU with more multiprocessors will automatically execute the program in less time than a GPU with fewer multiprocessors.
+
+```{r eval=T, echo=F, include=T, results='asis', fig.cap=fig$cap("plot7","Automatic Scalability"),fig.width=7, fig.height=5}
+    knitr::include_graphics("GPU_SMT.png")
+```
+
+## GPU computing | Programming model  
+
+The CUDA programming model has 3 abstractions:
+
+- Kernels (GPU functions)
+- Thread groups
+- Memory hierachy 
+
+## GPU computing | Basic program steps
+
+The utilize GPUs, all programs must perform the same steps as noted in the calling libraries section:  
+
+- allocate GPU memory
+- transfer data to GPU
+- launch GPU kernel (operates on threads, in block/grid arrangement)
+- transfer results from GPU  
+- clean up
+
+Note, the kernel is the basic unit of operation.  This is the program function that is parallelized across the GPU.
+
+## CUDA Kernel
+
+The basic execution block in a CUDA program is a kernel.  Kernels are blocks of code that are executed N times in parallel by N different CUDA threads.
+
+Each thread that executes the kernel is given a unique thread ID that is accessible within the kernel through the built-in threadIdx variable.
+
+The triple bracket specification determines the number of threads.
+
+```{r eval=F, echo=T, include=T, tidy=F}
+
+// Kernel definition 
+__global__ void VecAdd(float* A, float* B, float* C) 
+{ 
+    int i = threadIdx.x; 
+    C[i] = A[i] + B[i]; 
+} 
+int main() 
+{ 
+    ... // Kernel invocation with N threads 
+    VecAdd<<<1, N>>>(A, B, C); 
+    ... 
+}
+
+```
+
+## Thread hierarchy
+
+**threads**  
+For convenience, threads can be organized in 1-, 2-, or 3-d blocks.
+
+There is a limit to the number of threads per block, since all threads of a block are expected to reside on the same processor core and must share the limited memory resources of that core. On current GPUs, a thread block may contain up to 1024 threads.
+
+However, a kernel can be executed by multiple equally-shaped thread blocks, so that the total number of threads is equal to the number of threads per block times the number of blocks.
+
+**blocks**  
+Blocks are organized into 1-, 2-, or 3-d grid of thread blocks as illustrated on next slide. The number of thread blocks in a grid is usually dictated by the size of the data being processed or the number of processors in the system, which it can greatly exceed.
+
+
+## Grid - block -thread
+
+![Grid-block-thread](grid-of-thread-blocks.png)
+
+## Grid block thread | thread indexing
+
+```{r eval=T, echo=F, include=T, results='asis'}
+    knitr::include_graphics("cuda_indexing.png")
+```
+
+## Example vector add
+
+```{r echo=T, tidy=F, eval=F}
+
+// Kernel definition 
+__global__ void MatAdd(float A[N][N], float B[N][N], float C[N][N]) 
+{ 
+    int i = blockIdx.x * blockDim.x + threadIdx.x; 
+    int j = blockIdx.y * blockDim.y + threadIdx.y; 
+    if (i < N && j < N) C[i][j] = A[i][j] + B[i][j]; 
+} 
+int main() { 
+    ... 
+    // Kernel invocation 
+    dim3 threadsPerBlock(16, 16); 
+    dim3 numBlocks(N / threadsPerBlock.x, N / threadsPerBlock.y);
+    MatAdd<<<numBlocks, threadsPerBlock>>>(A, B, C); 
+    ... 
+}
+```
+
+
+## GPU computing |  Memory discussion  
+
+Memory on the GPU is segmented.
+
+- Thread - private local memory
+- Block - shared to all threads within block (volatile)
+- Grid - sees global memory
+
+Block memory is about 8x higher lower latency (higher throughput) than global memory.
+
+There are also two additional memory spaces: constant and texture.  These are persistant across kernel launches.
+
+## GPU computing |  Memory organization  
+
+```{r, eval=T, out.height="450px"}
+knitr::include_graphics("memory_hierachy.jpg")
+```
+
+## GPU computing | memory organization example
+
+* example code in profile5
+
+## Writing/wrapping your own CUDA/OpenCL code | optimization
+
+This is somewhere between science and art.
+
+A REALLY good tutorial on this here:  
+<https://cnugteren.github.io/tutorial/pages/page1.html>
+
+## Getting basic information on the GPU | GPU status
+
+Nvidia:
+
+```{bash eval=F,echo=T}
+nvidia-smi -q -d UTILIZATION -l 1  
+nvidia-smi -q -d MEMORY -l 1
+```
+
+## Profiling GPU use
+
+<https://developer.nvidia.com/performance-analysis-tools>
+
+`nvprof`
+
+Check out option "--profile-child-processes"
+
+
+
+
+
+
