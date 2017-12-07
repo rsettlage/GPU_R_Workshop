@@ -172,26 +172,26 @@ $$
 
 ```{r echo=F, eval=T, out.width="400px"}
 
-    # initialize a plot
-    plot(c(-1, 1), c(-1, 1), type = "n")
-
+    # calc pi
     n <- 10000
     x <- runif(n,0,1)
     y <- runif(n,0,1)
     inout <- x^2+y^2<1
     pi_est <- 4*sum(inout)/n
-    points(x=x,y=y,col="blue",pch=20)
     
-    # prepare "circle data"
+    # initialize a plot
+    plot(c(-1, 1), c(-1, 1), type = "n",
+         main=paste(pi_est,"vs",round(pi,6)))
+    points(x=x,y=y,col=ifelse(inout,"blue","red"),
+           pch=20,cex=0.8)
+    # draw the circle
     radius <- 1
     theta <- seq(0, 2 * pi, length = 200)
-    # draw the circle
     lines(x = radius * cos(theta), y = radius * sin(theta))
     # draw bounding square
     abline(h=c(-1,1),col="red")
     abline(v=c(-1,1),col="red")
     
-
 ```
 
 ## Basic example -- pi (2)
@@ -200,13 +200,20 @@ Monte carlo integrate area in circle and use formula.
 
 $$
 \begin{eqnarray*}
-f(x) & = & \int_0^{1} \sqrt{1-x^2} dx \\
-    & = & \frac{area}{4} \\
-    & \approx & \frac{1}{4} \sum_{x_i \in U(0,1), i = [1 \dots N]} \frac{\sqrt{1-x^2}}{N}
+\frac{area}{4} & = & \int_0^{1} \sqrt{1-x^2} dx \\
+    & \approx & \sum_{x_i \in U(0,1), i = [1 \dots N]} \frac{\sqrt{1-x^2}}{N}
 \end{eqnarray*}
 $$
+```{r eval=T, echo=F}
 
-Turns out, this is requires a LOT of points to get to a reasonable accuracy.  Good example for GPUs???
+    n <- 1e8
+    x <- runif(n,0,1)
+    pi_est <- 4 * sum(sqrt(1-x^2))/n
+
+```
+
+Turns out, this is requires a LOT of points to get to a reasonable accuracy.  Depending on how you do it, to get a stable estimate of pi to 5 decimal places may require $10^8-10^{11}$ random numbers.  Using the above in a single go, we get pi=`r pi_est` vs `r round(pi,6)`. Good example for GPUs???  
+
 
 ## Basic example -- pi (3)  
 
@@ -214,12 +221,62 @@ Buffon's needle (hotdog) toss:
 
 Toss hotdogs to ground with a ladder of evenly spaced lines layed out.  IF the spacing of the lines is the same as the length of the hotdog, we get:  
 
-$$\pi = \frac{2nh}{kL} = \frac{2*tosses}{crosses}$$
+$$\pi = \frac{2nH}{kL} = \frac{2*tosses}{crosses}$$
 
 
 Good example for GPUs???  
 
-What if we wanted to explore hotdog length (h) and line spacing (L)?
+
+```{r echo=F, eval=T}
+    
+    # modified slightly from 
+    # http://www.clayford.net/statistics/buffons-needle-problem-or-how-to-use-probability-to-estimate-pi/
+    H <- 0.75 # length of hotdog
+    L <- 1 # distance between lines
+    n <- 1e6 # number of dropped dogs
+    hit <- 0
+    for(i in 1:n) {
+    	x <- runif(1,0,1)
+    	y <- runif(1,0,1)
+    	while(x^2 + y^2 > 1) { # no points outside of unit circle
+    	    x <- runif(1,0,1)
+    	 	y <- runif(1,0,1)
+    	}	
+    	theta <- atan(y/x) # the random angle
+    	d <- runif(1,0,(L/2)) # distance of needle midpoint to nearest line
+    	if(d <= (H/2)*sin(theta)) {
+    		hit <- hit + 1
+    	} 
+    }
+    pi_est <- (n*2*H/L)/(hit)
+    #pi.est
+    
+    # I dont like the above for a couple of reasons:
+    # a) the while loop
+    # b) tan(y/x), I feel like there is a trig identity in 
+    # there that uses pi
+    # the below doesn't work, yet ....
+    # I think something is wrong with how I am limiting the landing area ... for later ...
+    n <- 1e6
+    H <- 0.75
+    L <- 1
+    # one end lands on x-axis between 0 and L
+    x1 <- runif(n,0,L)
+    y1 <- 0 
+    # other end possibilities
+    y2 <- runif(n,0,H) 
+    # towards x=0 or x=L
+    forwardback <- (-1)^rbinom(n=n,size=1,prob=0.5)
+    x2 <- x1 + forwardback*sqrt(H^2 - (y2)^2)  ## where is x2?
+    crosses <- 1*(x2>1) + 1*(x2<0)
+    #pi_est = 2*n*H/(L*sum(crosses))
+    #pi_est
+
+    
+
+```
+
+Using the above, with number of tossed dogs equal $10^6$, we get pi=`r pi_est` vs `r round(pi,6)`.  What if we wanted more accuracy or if we wanted to explore hotdog length (H) and line spacing (L)?  Now is it a good example for GPUs?  For space exploration, definitely yes.  Although, we will need to think about how we are doing this wtih RNGs.
 
 ## Statistics Example | OLS
 
@@ -230,11 +287,10 @@ We want to solve for $\hat{\beta}$, but it turns out it is more efficent and sta
 
 $(X'X)\hat{\beta} = X'y$
 
-
 * How many matrix operations do you see here?  
 * If X is 5x5, how many total operations??
 
-A ton.
+A ton.  Is THIS a good example for GPU? Yes.
 
 So, lets get on a GPU and start computing...
 
@@ -826,6 +882,8 @@ knitr::include_graphics("memory_hierachy.jpg")
 ## GPU computing | memory organization example
 
 * example code in profile5
+
+** Current OpenCL code is broken... **
 
 ## Writing/wrapping your own CUDA/OpenCL code | optimization
 
